@@ -58,19 +58,22 @@ const text=v=>v&&v!=="未体现"&&v!=="-"?String(v):"—";
 const arr=v=>Array.isArray(v)?v.filter(x=>x&&x!=="未体现"):[];
 const canonicalLink=v=>{try{const u=new URL(v);u.hash="";["utm_source","utm_medium","utm_campaign","utm_content"].forEach(k=>u.searchParams.delete(k));return u.toString().replace(/\/$/,"").toLowerCase()}catch{return String(v||"").trim().toLowerCase()}};
 function recordScore(r){let n=0;["titleCn","issuingAuthority","documentNumber","lifecycleStatusCn","effectiveDate","mandatoryExecutionDate","commentDeadline","background","content"].forEach(k=>{const v=r[k];if(v&&v!=="未体现"&&v!=="-"&&!String(v).includes("待补充"))n+=String(v).length>30?3:1});if(r.analysisMethod==="gemini+rules")n+=8;if(r.detailStatus==="ok")n+=5;n+=arr(r.productCategories).length+arr(r.complianceTopics).length;return n}
-function dedupeRecords(list){const map=new Map();list.forEach(r=>{const key=canonicalLink(r.link)||String(r.uid||"");const old=map.get(key);if(!old||recordScore(r)>recordScore(old))map.set(key,r)});return [...map.values()].sort((a,b)=>String(b.runTime||"").localeCompare(String(a.runTime||"")))}
-const records=dedupeRecords(sourceRecords);
+function dedupeRecords(list){const map=new Map();list.forEach(r=>{const key=r.analysisMethod==="spreadsheet-import"?"sheet:"+String(r.uid||""):canonicalLink(r.link)||String(r.uid||"");const old=map.get(key);if(!old||recordScore(r)>recordScore(old))map.set(key,r)});return [...map.values()].sort((a,b)=>String(b.runTime||"").localeCompare(String(a.runTime||"")))}
+async function init(){
+const historicalFiles=["data/historical_records_1.json","data/historical_records_2.json","data/historical_records_3.json","data/historical_records_4.json"];
+const historicalChunks=await Promise.all(historicalFiles.map(async path=>{const response=await fetch(path,{cache:"no-store"});if(!response.ok)throw new Error(path+" 加载失败");return response.json()}));
+const records=dedupeRecords(sourceRecords.concat(...historicalChunks));
 const dateOf=v=>/^\d{4}-\d{2}-\d{2}/.test(String(v||""))?String(v).slice(0,10):"";
 const weekKey=v=>{const s=dateOf(v);if(!s)return"";const d=new Date(s+"T00:00:00Z");d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));return d.toISOString().slice(0,10)};
-const latestWeek=[...new Set(records.map(r=>weekKey(r.runTime)).filter(Boolean))].sort().pop()||"";
+const latestWeek=[...new Set(records.filter(r=>r.analysisMethod!=="spreadsheet-import").map(r=>weekKey(r.runTime)).filter(Boolean))].sort().pop()||"";
 const WORKFLOW_KEY="regulatory-weekly-workflow-v1";
-const recordKey=r=>canonicalLink(r.link)||String(r.uid||"");
+const recordKey=r=>r.analysisMethod==="spreadsheet-import"?String(r.uid||""):canonicalLink(r.link)||String(r.uid||"");
 function loadWorkflow(){try{return JSON.parse(localStorage.getItem(WORKFLOW_KEY)||"{}")}catch{return{}}}
 let workflow=loadWorkflow();
 let workflowChanged=false;
-records.forEach(r=>{const k=recordKey(r);if(weekKey(r.runTime)===latestWeek&&!workflow[k]){workflow[k]={status:"pending",queued:true,updatedAt:new Date().toISOString()};workflowChanged=true}});
+records.forEach(r=>{const k=recordKey(r);if(r.analysisMethod!=="spreadsheet-import"&&weekKey(r.runTime)===latestWeek&&!workflow[k]){workflow[k]={status:"pending",queued:true,updatedAt:new Date().toISOString()};workflowChanged=true}});
 if(workflowChanged)localStorage.setItem(WORKFLOW_KEY,JSON.stringify(workflow));
-const workflowOf=r=>workflow[recordKey(r)]||{status:"archive",queued:false};
+const workflowOf=r=>workflow[recordKey(r)]||(r.workflowStatus?{status:r.workflowStatus,queued:false}:{status:"archive",queued:false});
 function setWorkflow(key,status){workflow[key]={status,queued:status==="pending",updatedAt:new Date().toISOString()};localStorage.setItem(WORKFLOW_KEY,JSON.stringify(workflow));render()}
 function workflowLabel(r){const s=workflowOf(r).status;return s==="following"?"人工状态：在途":s==="done"?"人工状态：已完成":s==="pending"?"待人工选择":"历史未分类"}
 const uniq=a=>[...new Set(a.filter(v=>v&&v!=="未体现"&&v!=="—"))].sort((a,b)=>String(a).localeCompare(String(b),"zh-CN"));
@@ -78,8 +81,11 @@ const statusOf=r=>text(r.lifecycleStatusCn);
 const groupOf=r=>text(r.group||r.team||r.ownerGroup);
 const ownerOf=r=>text(r.owner||r.responsiblePerson);
 const progressOf=r=>text(r.progress||r.currentProgress);
-const docOf=r=>r.relatedDocument||r.relatedDoc||"";
+const docTextOf=r=>r.relatedDocumentText||r.relatedDocument||r.relatedDoc||"";
+const docLinkOf=r=>r.relatedDocumentLink||(/^https?:\/\//i.test(String(r.relatedDocument||r.relatedDoc||""))?(r.relatedDocument||r.relatedDoc):"");
+const sourceLinkOf=r=>/^https?:\/\//i.test(String(r.link||""))?r.link:"";
 function certOf(r){
+  const explicit=arr(r.certificationTypes);if(explicit.length)return explicit;
   const s=(arr(r.complianceTopics).join(" ")+" "+(r.feed||"")+" "+(r.titleCn||"")+" "+(r.titleOriginal||"")).toLowerCase();
   const out=[];
   if(/radio|wireless|frequency|spectrum|sar|fcc|rra|srrc|无线|频谱/.test(s))out.push("无线认证");
@@ -119,8 +125,8 @@ const viewMeta={
 function matchView(r){
   const w=workflowOf(r);
   if(currentView==="week"||currentView==="report")return w.status==="pending"&&w.queued;
-  if(currentView==="history")return !(w.status==="pending"&&w.queued);
-  if(currentView==="issues"){const method=String(r.analysisMethod||"").toLowerCase(),detail=String(r.detailStatus||"").toLowerCase();return detail!=="ok"||method==="rules"||method.includes("pending")}
+  if(currentView==="history")return w.status==="archive";
+  if(currentView==="issues"){const method=String(r.analysisMethod||"").toLowerCase(),detail=String(r.detailStatus||"").toLowerCase();if(method==="spreadsheet-import")return false;return detail!=="ok"||method==="rules"||method.includes("pending")}
   if(currentView==="ongoing")return w.status==="following";
   if(currentView==="done")return w.status==="done";
   return true;
@@ -131,13 +137,13 @@ function card(r,i){
   const statusClass=/征求/.test(statusOf(r))?"consult":"status";
   const wfClass=wf.status==="following"?"wf-following":wf.status==="done"?"wf-done":"wf-pending";
   const controls='<div class="workflow-controls" data-key="'+esc(key)+'"><span class="workflow-state '+wfClass+'">'+esc(workflowLabel(r))+'</span><button type="button" data-workflow="following" data-key="'+esc(key)+'">开始跟进</button><button type="button" data-workflow="done" data-key="'+esc(key)+'">标记已完成</button>'+(wf.status!=="pending"?'<button type="button" class="secondary" data-workflow="pending" data-key="'+esc(key)+'">恢复待处理</button>':'')+'</div>';
-  return '<details class="card" '+(i===0?'open':'')+'><summary><span class="num">'+String(i+1).padStart(2,"0")+'</span><div class="summary-main"><div class="tags"><span class="tag region">'+esc(text(r.country))+'</span><span class="tag">'+esc(cert)+'</span><span class="tag '+statusClass+'">'+esc(statusOf(r))+'</span>'+(issue?'<span class="tag issue">需人工核验</span>':'')+'</div><h3>'+esc(text(r.titleCn))+'</h3><div class="quick"><div><small>提出日期</small><b>'+esc(text(r.pubDate))+'</b></div><div><small>强制执行日期</small><b>'+esc(text(r.mandatoryExecutionDate))+'</b></div><div><small>意见反馈截至日期</small><b>'+esc(text(r.commentDeadline))+'</b></div><div><small>影响产品</small><b>'+esc(products)+'</b></div></div><p class="brief">'+esc(short(r.content,210))+'</p>'+controls+'</div><span class="chev">⌄</span></summary><div class="detail"><div class="detail-grid"><div><section class="panel"><h4>事项简述</h4><p>'+esc(text(r.titleCn))+'</p></section><section class="panel"><h4>法规 / 标准重点描述</h4><p>'+esc(numbered(r.content))+'</p></section><section class="panel"><h4>AI 翻译 / 解读</h4><p><b>法规背景</b>\n'+esc(numbered(r.background))+'\n\n<b>重点内容</b>\n'+esc(numbered(r.content))+'</p></section></div><div><div class="facts"><div class="fact"><small>区域</small><b>'+esc(text(r.country))+'</b></div><div class="fact"><small>认证类型</small><b>'+esc(cert)+'</b></div><div class="fact"><small>发布机关</small><b>'+esc(text(r.issuingAuthority))+'</b></div><div class="fact"><small>文号</small><b>'+esc(text(r.documentNumber))+'</b></div><div class="fact"><small>法规状态</small><b>'+esc(statusOf(r))+'</b></div><div class="fact"><small>人工跟进状态</small><b>'+esc(workflowLabel(r))+'</b></div><div class="fact"><small>合规领域</small><b>'+esc(topics)+'</b></div><div class="fact"><small>组别</small><b>'+esc(groupOf(r))+'</b></div><div class="fact"><small>责任人</small><b>'+esc(ownerOf(r))+'</b></div><div class="fact"><small>当前进展</small><b>'+esc(progressOf(r))+'</b></div><div class="fact"><small>相关文档</small><b>'+esc(docOf(r)?"已关联":"—")+'</b></div><div class="fact"><small>发布来源</small><b>'+esc(text(r.feed))+'</b></div></div><div class="links">'+(docOf(r)?'<a class="link" href="'+esc(docOf(r))+'" target="_blank" rel="noreferrer">相关文档 ↗</a>':'')+'<a class="link" href="https://mi.feishu.cn/wiki/OMxvwAylvidpRokb1fEcGKtFnXP?sheet=9dkwHT" target="_blank" rel="noreferrer">飞书表格 ↗</a><a class="link primary" href="'+esc(r.link)+'" target="_blank" rel="noreferrer">原文 / 链接 ↗</a></div></div></div></div></details>'
+  return '<details class="card" '+(i===0?'open':'')+'><summary><span class="num">'+String(i+1).padStart(2,"0")+'</span><div class="summary-main"><div class="tags"><span class="tag region">'+esc(text(r.country))+'</span><span class="tag">'+esc(cert)+'</span><span class="tag '+statusClass+'">'+esc(statusOf(r))+'</span>'+(issue?'<span class="tag issue">需人工核验</span>':'')+'</div><h3>'+esc(text(r.titleCn))+'</h3><div class="quick"><div><small>提出日期</small><b>'+esc(text(r.pubDate))+'</b></div><div><small>强制执行日期</small><b>'+esc(text(r.mandatoryExecutionDate))+'</b></div><div><small>意见反馈截至日期</small><b>'+esc(text(r.commentDeadline))+'</b></div><div><small>影响产品</small><b>'+esc(products)+'</b></div></div><p class="brief">'+esc(short(r.content,210))+'</p>'+controls+'</div><span class="chev">⌄</span></summary><div class="detail"><div class="detail-grid"><div><section class="panel"><h4>事项简述</h4><p>'+esc(text(r.titleCn))+'</p></section><section class="panel"><h4>法规 / 标准重点描述</h4><p>'+esc(numbered(r.content))+'</p></section><section class="panel"><h4>AI 翻译 / 解读</h4><p><b>法规背景</b>\n'+esc(numbered(r.background))+'\n\n<b>重点内容</b>\n'+esc(numbered(r.content))+'</p></section></div><div><div class="facts"><div class="fact"><small>区域</small><b>'+esc(text(r.country))+'</b></div><div class="fact"><small>认证类型</small><b>'+esc(cert)+'</b></div><div class="fact"><small>发布机关</small><b>'+esc(text(r.issuingAuthority))+'</b></div><div class="fact"><small>文号</small><b>'+esc(text(r.documentNumber))+'</b></div><div class="fact"><small>法规状态</small><b>'+esc(statusOf(r))+'</b></div><div class="fact"><small>人工跟进状态</small><b>'+esc(workflowLabel(r))+'</b></div><div class="fact"><small>合规领域</small><b>'+esc(topics)+'</b></div><div class="fact"><small>组别</small><b>'+esc(groupOf(r))+'</b></div><div class="fact"><small>责任人</small><b>'+esc(ownerOf(r))+'</b></div><div class="fact"><small>当前进展</small><b>'+esc(progressOf(r))+'</b></div><div class="fact"><small>相关文档</small><b>'+esc(text(docTextOf(r)))+'</b></div><div class="fact"><small>发布来源</small><b>'+esc(text(r.feed))+'</b></div></div><div class="links">'+(docLinkOf(r)?'<a class="link" href="'+esc(docLinkOf(r))+'" target="_blank" rel="noreferrer">公开文档 ↗</a>':'')+'<a class="link" href="https://mi.feishu.cn/wiki/OMxvwAylvidpRokb1fEcGKtFnXP?sheet=9dkwHT" target="_blank" rel="noreferrer">飞书表格 ↗</a>'+(sourceLinkOf(r)?'<a class="link primary" href="'+esc(sourceLinkOf(r))+'" target="_blank" rel="noreferrer">原文 / 链接 ↗</a>':'')+'</div></div></div></div></details>'
 }
 function render(){
   const f={country:$("country").value,status:$("status").value,product:$("product").value,certType:$("certType").value,group:$("group").value,owner:$("owner").value};
   const q=$("search").value.trim().toLowerCase();
   const visible=records.filter(r=>{
-    const hay=[r.titleCn,r.titleOriginal,r.country,r.feed,r.issuingAuthority,r.documentNumber,r.background,r.content,...arr(r.productCategories),...arr(r.complianceTopics),...certOf(r),groupOf(r),ownerOf(r),progressOf(r)].join(" ").toLowerCase();
+    const hay=[r.titleCn,r.titleOriginal,r.country,r.feed,r.issuingAuthority,r.documentNumber,r.background,r.content,...arr(r.productCategories),...arr(r.complianceTopics),...certOf(r),groupOf(r),ownerOf(r),progressOf(r),docTextOf(r),r.sourceText].join(" ").toLowerCase();
     return matchView(r)&&(!q||hay.includes(q))&&(f.country==="全部"||r.country===f.country)&&(f.status==="全部"||statusOf(r)===f.status||arr(r.statusTags).includes(f.status))&&(f.product==="全部"||arr(r.productCategories).includes(f.product))&&(f.certType==="全部"||certOf(r).includes(f.certType))&&(f.group==="全部"||groupOf(r)===f.group)&&(f.owner==="全部"||ownerOf(r)===f.owner);
   });
   $("count").textContent=visible.length;$("statTotal").textContent=visible.length;$("statDirect").textContent=visible.filter(r=>r.productRelevanceCn==="直接相关").length;$("statConsult").textContent=visible.filter(r=>/征求/.test(statusOf(r)+" "+arr(r.statusTags).join(" "))).length;
@@ -147,6 +153,8 @@ function render(){
 document.querySelectorAll("[data-view]").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll("[data-view]").forEach(x=>x.classList.remove("active"));btn.classList.add("active");currentView=btn.dataset.view;[$("pageTitle").textContent,$("pageDesc").textContent]=viewMeta[currentView];render()}));
 ["country","status","product","certType","group","owner"].forEach(id=>$(id).addEventListener("change",render));$("search").addEventListener("input",render);
 $("list").addEventListener("click",e=>{const b=e.target.closest("[data-workflow]");if(!b)return;e.preventDefault();e.stopPropagation();setWorkflow(b.dataset.key,b.dataset.workflow)});$("reset").addEventListener("click",()=>{$("search").value="";["country","status","product","certType","group","owner"].forEach(id=>$(id).value="全部");render()});render();
+}
+init().catch(error=>{console.error(error);$("empty").textContent="历史数据加载失败，请刷新页面重试";$("empty").style.display="grid"});
 </script>
 </body>
 </html>
