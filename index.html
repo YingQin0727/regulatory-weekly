@@ -107,17 +107,18 @@ function numbered(v){
   const p=s.split(/(?<=[。；])\s*/).map(x=>x.trim()).filter(Boolean);
   return p.length>1?p.map((x,i)=>(i+1)+". "+x).join("\n"):s;
 }
-const FILTER_IDS=["country","status","product","certType","group","owner"];
-let countryQuery="";
+const FILTER_NAMES={country:"区域",status:"法规状态",product:"适用产品",certType:"认证类型",group:"组别",owner:"责任人"};
+const FILTER_IDS=Object.keys(FILTER_NAMES);
+const filterQueries=Object.fromEntries(FILTER_IDS.map(id=>[id,""]));
 const selectedFilters=Object.fromEntries(FILTER_IDS.map(id=>[id,new Set()]));
 function updateMultiLabel(id){
   const values=[...selectedFilters[id]],label=$(id+"Field").querySelector(".multi-label");
-  if(id==="country"&&countryQuery&&values.length===0){label.textContent=countryQuery;label.title="输入筛选："+countryQuery;return}
+  if(filterQueries[id]&&values.length===0){label.textContent=filterQueries[id];label.title="输入筛选："+filterQueries[id];return}
   label.textContent=values.length===0?"全部":values.length===1?values[0]:values[0]+" 等 "+values.length+" 项";
   label.title=values.join("、");
 }
 function fillMulti(id,values){
-  const search=id==="country"?'<div class="multi-search-wrap"><input id="countryInput" class="multi-search" placeholder="输入区域进行筛选" autocomplete="off"></div>':"";
+  const search='<div class="multi-search-wrap"><input class="multi-search" data-filter-input="'+id+'" placeholder="输入'+FILTER_NAMES[id]+'进行筛选" autocomplete="off"></div>';
   $(id+"Menu").innerHTML=search+'<div class="multi-actions"><button type="button" data-clear="'+id+'">清空</button><button type="button" data-all="'+id+'">全选</button></div>'+uniq(values).map(v=>'<label class="multi-option"><input type="checkbox" value="'+esc(v)+'"><span>'+esc(v)+'</span></label>').join("");
   updateMultiLabel(id);
 }
@@ -128,6 +129,7 @@ fillMulti("certType",records.flatMap(certOf));
 fillMulti("group",records.map(groupOf));
 fillMulti("owner",records.map(ownerOf));
 function filterMatch(id,values){const chosen=selectedFilters[id];return chosen.size===0||values.some(v=>chosen.has(v))}
+function queryMatch(id,values){const q=filterQueries[id].trim().toLowerCase();return !q||values.some(v=>String(v??"").toLowerCase().includes(q))}
 $("updatedAt").textContent=records[0]?.runTime||"—";
 let currentView="week";
 const viewMeta={
@@ -159,7 +161,7 @@ function render(){
   const q=$("search").value.trim().toLowerCase();
   const visible=records.filter(r=>{
     const hay=[r.titleCn,r.titleOriginal,r.country,r.feed,r.issuingAuthority,r.documentNumber,r.background,r.content,...arr(r.productCategories),...arr(r.complianceTopics),...certOf(r),groupOf(r),ownerOf(r),progressOf(r),docTextOf(r),r.sourceText].join(" ").toLowerCase();
-    return matchView(r)&&(!q||hay.includes(q))&&(!countryQuery||String(r.country||"").toLowerCase().includes(countryQuery.toLowerCase()))&&filterMatch("country",[r.country])&&filterMatch("status",[statusOf(r),...arr(r.statusTags)])&&filterMatch("product",arr(r.productCategories))&&filterMatch("certType",certOf(r))&&filterMatch("group",[groupOf(r)])&&filterMatch("owner",[ownerOf(r)]);
+    return matchView(r)&&(!q||hay.includes(q))&&queryMatch("country",[r.country])&&filterMatch("country",[r.country])&&queryMatch("status",[statusOf(r),...arr(r.statusTags)])&&filterMatch("status",[statusOf(r),...arr(r.statusTags)])&&queryMatch("product",arr(r.productCategories))&&filterMatch("product",arr(r.productCategories))&&queryMatch("certType",certOf(r))&&filterMatch("certType",certOf(r))&&queryMatch("group",[groupOf(r)])&&filterMatch("group",[groupOf(r)])&&queryMatch("owner",[ownerOf(r)])&&filterMatch("owner",[ownerOf(r)]);
   });
   $("count").textContent=visible.length;
   $("list").innerHTML=visible.map(card).join("");$("empty").style.display=visible.length?"none":"grid";
@@ -169,13 +171,12 @@ document.addEventListener("click",e=>{
   const trigger=e.target.closest("[data-multi]");
   if(trigger){const id=trigger.dataset.multi,field=$(id+"Field"),opening=!field.classList.contains("open");document.querySelectorAll(".multi.open").forEach(x=>x.classList.remove("open"));field.classList.toggle("open",opening);trigger.setAttribute("aria-expanded",String(opening));return}
   const clear=e.target.closest("[data-clear]"),all=e.target.closest("[data-all]");
-  if(clear||all){const id=(clear||all).dataset[clear?"clear":"all"],menu=$(id+"Menu"),checks=[...menu.querySelectorAll('input[type="checkbox"]')];selectedFilters[id].clear();if(all)checks.forEach(x=>{x.checked=true;selectedFilters[id].add(x.value)});else checks.forEach(x=>x.checked=false);updateMultiLabel(id);render();return}
+  if(clear||all){const id=(clear||all).dataset[clear?"clear":"all"],menu=$(id+"Menu"),checks=[...menu.querySelectorAll('input[type="checkbox"]')];selectedFilters[id].clear();if(all)checks.forEach(x=>{x.checked=true;selectedFilters[id].add(x.value)});else{checks.forEach(x=>x.checked=false);filterQueries[id]="";const input=menu.querySelector("[data-filter-input]");if(input)input.value="";menu.querySelectorAll(".multi-option").forEach(option=>option.style.display="flex")}updateMultiLabel(id);render();return}
   if(!e.target.closest(".multi"))document.querySelectorAll(".multi.open").forEach(x=>{x.classList.remove("open");x.querySelector(".multi-trigger").setAttribute("aria-expanded","false")});
 });
-FILTER_IDS.forEach(id=>$(id+"Menu").addEventListener("change",e=>{if(!e.target.matches('input[type="checkbox"]'))return;e.target.checked?selectedFilters[id].add(e.target.value):selectedFilters[id].delete(e.target.value);updateMultiLabel(id);render()}));
-$("countryMenu").addEventListener("input",e=>{if(e.target.id!=="countryInput")return;countryQuery=e.target.value.trim();const q=countryQuery.toLowerCase();$("countryMenu").querySelectorAll(".multi-option").forEach(option=>{option.style.display=!q||option.textContent.toLowerCase().includes(q)?"flex":"none"});updateMultiLabel("country");render()});
+FILTER_IDS.forEach(id=>{const menu=$(id+"Menu");menu.addEventListener("change",e=>{if(!e.target.matches('input[type="checkbox"]'))return;e.target.checked?selectedFilters[id].add(e.target.value):selectedFilters[id].delete(e.target.value);updateMultiLabel(id);render()});menu.addEventListener("input",e=>{if(!e.target.matches("[data-filter-input]"))return;filterQueries[id]=e.target.value.trim();const q=filterQueries[id].toLowerCase();menu.querySelectorAll(".multi-option").forEach(option=>{option.style.display=!q||option.textContent.toLowerCase().includes(q)?"flex":"none"});updateMultiLabel(id);render()})});
 $("search").addEventListener("input",render);
-$("list").addEventListener("click",e=>{const b=e.target.closest("[data-workflow]");if(!b)return;e.preventDefault();e.stopPropagation();setWorkflow(b.dataset.key,b.dataset.workflow)});$("reset").addEventListener("click",()=>{$("search").value="";countryQuery="";$("countryInput").value="";$("countryMenu").querySelectorAll(".multi-option").forEach(option=>option.style.display="flex");FILTER_IDS.forEach(id=>{selectedFilters[id].clear();$(id+"Menu").querySelectorAll('input[type="checkbox"]').forEach(x=>x.checked=false);updateMultiLabel(id)});render()});render();
+$("list").addEventListener("click",e=>{const b=e.target.closest("[data-workflow]");if(!b)return;e.preventDefault();e.stopPropagation();setWorkflow(b.dataset.key,b.dataset.workflow)});$("reset").addEventListener("click",()=>{$("search").value="";FILTER_IDS.forEach(id=>{filterQueries[id]="";selectedFilters[id].clear();const menu=$(id+"Menu"),input=menu.querySelector("[data-filter-input]");if(input)input.value="";menu.querySelectorAll(".multi-option").forEach(option=>option.style.display="flex");menu.querySelectorAll('input[type="checkbox"]').forEach(x=>x.checked=false);updateMultiLabel(id)});render()});render();
 }
 init().catch(error=>{console.error(error);$("empty").textContent="历史数据加载失败，请刷新页面重试";$("empty").style.display="grid"});
 </script>
